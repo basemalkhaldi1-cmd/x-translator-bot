@@ -28,15 +28,14 @@ jobs:
       - name: Run Translator Bot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          TWITTER_USERNAME: ${{ secrets.TWITTER_USERNAME }}
-          TWITTER_EMAIL: ${{ secrets.TWITTER_EMAIL }}
-          TWITTER_PASSWORD: ${{ secrets.TWITTER_PASSWORD }}
+          TWITTER_AUTH_TOKEN: ${{ secrets.TWITTER_AUTH_TOKEN }}
+          TWITTER_CT0: ${{ secrets.TWITTER_CT0 }}
         run: python bot.py
 
       - name: Save Processed Tweets
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          git add processed_ids.txt cookies.json || true
+          git add processed_ids.txt || true
           git commit -m "Update state [skip ci]" || exit 0
           git push
