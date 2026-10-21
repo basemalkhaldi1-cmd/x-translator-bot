@@ -1,0 +1,3 @@
+twikit
+requests
+pillow
