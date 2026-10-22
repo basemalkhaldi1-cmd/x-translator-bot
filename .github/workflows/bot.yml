@@ -37,10 +37,18 @@ jobs:
         run: python bot.py
 
       - name: Save Processed Tweets
+        if: always()
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "actions@github.com"
-          git add processed_ids.txt || true
-          git commit -m "Update state [skip ci]" || exit 0
-          git pull --rebase || true
-          git push
+          if [ -f processed_ids.txt ]; then
+            cp processed_ids.txt /tmp/processed_ids_backup.txt
+            git config --global user.name "github-actions"
+            git config --global user.email "actions@github.com"
+            git fetch origin main
+            git checkout -B main origin/main
+            cat /tmp/processed_ids_backup.txt >> processed_ids.txt
+            awk '!seen[$0]++' processed_ids.txt > /tmp/merged_ids.txt
+            mv /tmp/merged_ids.txt processed_ids.txt
+            git add processed_ids.txt
+            git commit -m "Update state [skip ci]" || exit 0
+            git push origin main || true
+          fi
