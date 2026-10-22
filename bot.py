@@ -34,10 +34,10 @@ def load_processed_ids():
     if os.path.exists(PROCESSED_FILE):
         with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
-        if lines and lines[0] == "#v4":
+        if lines and lines[0] == "#v5":
             return set(lines[1:])
     with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
-        f.write("#v4\n")
+        f.write("#v5\n")
     return set()
 
 def save_processed_id(tweet_id):
@@ -47,6 +47,16 @@ def save_processed_id(tweet_id):
 def is_sports_tweet(text):
     normalized = re.sub(r"(.)\1{2,}", r"\1", text)
     return any(kw in text or kw in normalized for kw in SPORTS_KEYWORDS)
+
+def fit_tweet_length(translated_text, video_link=None):
+    max_len = 210 if video_link else 250
+    text = translated_text.strip()
+    if len(text) > max_len:
+        cut = text[:max_len].rsplit(" ", 1)[0]
+        text = (cut if cut else text[:max_len]) + "..."
+    if video_link:
+        return f"{text}\n\n{video_link}"
+    return text
 
 def free_fallback_translate(text):
     if not is_sports_tweet(text):
@@ -58,7 +68,6 @@ def free_fallback_translate(text):
 
     translated = ""
 
-    # Route 1: Google Translate Mobile Web
     try:
         res = requests.get(
             "https://translate.google.com/m",
@@ -72,7 +81,6 @@ def free_fallback_translate(text):
     except Exception as e:
         print(f"Route 1 error: {e}")
 
-    # Route 2: Google Translate GTX API
     if not translated:
         try:
             res = requests.get(
@@ -86,7 +94,6 @@ def free_fallback_translate(text):
         except Exception as e:
             print(f"Route 2 error: {e}")
 
-    # Route 3: MyMemory Free Translation API
     if not translated:
         try:
             res = requests.get(
@@ -116,7 +123,7 @@ Analyze the following Arabic tweet:
 Task:
 1. Determine if this tweet is related to sports (football, matches, goals, players, clubs, etc.).
 2. If it is NOT sports-related, reply ONLY with: NOT_SPORTS
-3. If it IS sports-related, translate it into exciting, authentic English football commentary style (use natural English football terms like 'GOAAAL!', match minutes, club/player names in English).
+3. If it IS sports-related, translate it into exciting, concise English football commentary under 200 characters (use natural terms like 'GOAAAL!', club/player names in English).
 Do NOT include any extra notes or explanations. Return ONLY the translated English text."""
 
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -196,9 +203,7 @@ async def main():
                     src_id = getattr(item, 'source_status_id', None) or t_id
                     video_link = f"https://x.com/i/status/{src_id}/video/1"
 
-        final_tweet_text = translated_text
-        if video_link:
-            final_tweet_text += f"\n\n{video_link}"
+        final_tweet_text = fit_tweet_length(translated_text, video_link)
 
         print(f"Publishing tweet: {final_tweet_text}")
         await client.create_tweet(text=final_tweet_text, media_ids=media_ids if media_ids else None)
