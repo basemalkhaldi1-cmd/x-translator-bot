@@ -1,5 +1,6 @@
 import os
 import re
+import html
 import asyncio
 import requests
 from twikit import Client
@@ -10,6 +11,10 @@ PROCESSED_FILE = "processed_ids.txt"
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 TW_AUTH_TOKEN = (os.environ.get("TWITTER_AUTH_TOKEN") or "").strip().strip('"').strip("'")
 TW_CT0 = (os.environ.get("TWITTER_CT0") or "").strip().strip('"').strip("'")
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+}
 
 SPORTS_KEYWORDS = [
     "هدف", "قوول", "قول", "جول", "يسجل", "سجل", "متقدم", "يتقدم", "التعادل", "تعادل",
@@ -29,10 +34,10 @@ def load_processed_ids():
     if os.path.exists(PROCESSED_FILE):
         with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
-        if lines and lines[0] == "#v3":
+        if lines and lines[0] == "#v4":
             return set(lines[1:])
     with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
-        f.write("#v3\n")
+        f.write("#v4\n")
     return set()
 
 def save_processed_id(tweet_id):
@@ -51,11 +56,52 @@ def free_fallback_translate(text):
     cleaned = re.sub(r"(قو+ل|جو+ل)", "هدف!", text)
     cleaned = re.sub(r"(.)\1{2,}", r"\1", cleaned)
 
-    url = "https://translate.googleapis.com/translate_a/single"
-    params = {"client": "gtx", "sl": "ar", "tl": "en", "dt": "t", "q": cleaned}
-    res = requests.get(url, params=params, timeout=20)
-    data = res.json()
-    translated = "".join(part[0] for part in data[0] if part[0]).strip()
+    translated = ""
+
+    # Route 1: Google Translate Mobile Web
+    try:
+        res = requests.get(
+            "https://translate.google.com/m",
+            params={"sl": "ar", "tl": "en", "q": cleaned},
+            headers=HEADERS,
+            timeout=15
+        )
+        m = re.search(r'<div class="result-container">(.*?)</div>', res.text, re.DOTALL)
+        if m:
+            translated = html.unescape(m.group(1)).strip()
+    except Exception as e:
+        print(f"Route 1 error: {e}")
+
+    # Route 2: Google Translate GTX API
+    if not translated:
+        try:
+            res = requests.get(
+                "https://translate.googleapis.com/translate_a/single",
+                params={"client": "gtx", "sl": "ar", "tl": "en", "dt": "t", "q": cleaned},
+                headers=HEADERS,
+                timeout=15
+            )
+            data = res.json()
+            translated = "".join(part[0] for part in data[0] if part and part[0]).strip()
+        except Exception as e:
+            print(f"Route 2 error: {e}")
+
+    # Route 3: MyMemory Free Translation API
+    if not translated:
+        try:
+            res = requests.get(
+                "https://api.mymemory.translated.net/get",
+                params={"q": cleaned[:450], "langpair": "ar|en"},
+                headers=HEADERS,
+                timeout=15
+            )
+            data = res.json()
+            translated = (data.get("responseData", {}).get("translatedText") or "").strip()
+        except Exception as e:
+            print(f"Route 3 error: {e}")
+
+    if not translated:
+        return "NOT_SPORTS"
 
     if has_goal and "GOAAAL" not in translated.upper():
         translated = f"🚨 GOAAAL! ⚽🔥\n{translated}"
@@ -77,7 +123,7 @@ Do NOT include any extra notes or explanations. Return ONLY the translated Engli
         for model in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
             try:
-                response = requests.post(url, json=payload, timeout=20)
+                response = requests.post(url, json=payload, timeout=15)
                 res_json = response.json()
                 if "candidates" in res_json:
                     return res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -138,7 +184,7 @@ async def main():
                 if media_type == 'photo':
                     img_url = getattr(item, 'media_url', None) or getattr(item, 'media_url_https', None)
                     if img_url:
-                        img_data = requests.get(img_url, timeout=20).content
+                        img_data = requests.get(img_url, headers=HEADERS, timeout=20).content
                         img_path = f"temp_{t_id}_{idx}.jpg"
                         with open(img_path, 'wb') as img_f:
                             img_f.write(img_data)
