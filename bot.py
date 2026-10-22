@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import html
 import asyncio
 import requests
@@ -7,6 +8,8 @@ from twikit import Client
 
 TARGET_USER = "Amr13jn"
 PROCESSED_FILE = "processed_ids.txt"
+CHECK_INTERVAL = 20   # الفحص كل 20 ثانية (أقصى سرعة آمنة ضد الحظر)
+RUN_DURATION = 280    # البقاء متصلاً بشكل متواصل طوال دورة التشغيل
 
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 TW_AUTH_TOKEN = (os.environ.get("TWITTER_AUTH_TOKEN") or "").strip().strip('"').strip("'")
@@ -40,7 +43,8 @@ def load_processed_ids():
         f.write("#v5\n")
     return set()
 
-def save_processed_id(tweet_id):
+def save_processed_id(tweet_id, processed_set):
+    processed_set.add(str(tweet_id))
     with open(PROCESSED_FILE, "a", encoding="utf-8") as f:
         f.write(f"{tweet_id}\n")
 
@@ -78,8 +82,8 @@ def free_fallback_translate(text):
         m = re.search(r'<div class="result-container">(.*?)</div>', res.text, re.DOTALL)
         if m:
             translated = html.unescape(m.group(1)).strip()
-    except Exception as e:
-        print(f"Route 1 error: {e}")
+    except Exception:
+        pass
 
     if not translated:
         try:
@@ -91,8 +95,8 @@ def free_fallback_translate(text):
             )
             data = res.json()
             translated = "".join(part[0] for part in data[0] if part and part[0]).strip()
-        except Exception as e:
-            print(f"Route 2 error: {e}")
+        except Exception:
+            pass
 
     if not translated:
         try:
@@ -104,8 +108,8 @@ def free_fallback_translate(text):
             )
             data = res.json()
             translated = (data.get("responseData", {}).get("translatedText") or "").strip()
-        except Exception as e:
-            print(f"Route 3 error: {e}")
+        except Exception:
+            pass
 
     if not translated:
         return "NOT_SPORTS"
@@ -137,49 +141,29 @@ Do NOT include any extra notes or explanations. Return ONLY the translated Engli
             except Exception:
                 pass
 
-    print("Using built-in free sports translator...")
     return free_fallback_translate(text)
 
-async def main():
-    processed_ids = load_processed_ids()
-    is_first_run = len(processed_ids) == 0
-
-    client = Client(language='en-US')
-    client.set_cookies({'auth_token': TW_AUTH_TOKEN, 'ct0': TW_CT0})
-
-    print(f"Fetching latest tweets for @{TARGET_USER}...")
-    user = await client.get_user_by_screen_name(TARGET_USER)
-    tweets = await user.get_tweets('Tweets')
-
-    posted_count = 0
-
+async def check_and_post(client, user, processed_ids):
+    tweets = await user.get_tweets('Tweets', count=5)
     for tweet in tweets:
         t_id = str(tweet.id)
         if t_id in processed_ids:
             continue
 
-        if getattr(tweet, 'retweeted_tweet', None) is not None:
-            save_processed_id(t_id)
-            continue
-        if getattr(tweet, 'in_reply_to_tweet_id', None) is not None:
-            save_processed_id(t_id)
-            continue
-
-        if is_first_run and posted_count >= 1:
-            save_processed_id(t_id)
+        if getattr(tweet, 'retweeted_tweet', None) is not None or getattr(tweet, 'in_reply_to_tweet_id', None) is not None:
+            save_processed_id(t_id, processed_ids)
             continue
 
         clean_text = re.sub(r'https://t\.co/\S+', '', tweet.text or '').strip()
         if not clean_text:
-            save_processed_id(t_id)
+            save_processed_id(t_id, processed_ids)
             continue
 
-        print(f"Processing tweet {t_id}: {clean_text[:50]}...")
+        print(f"New tweet detected {t_id}: {clean_text[:50]}...")
         translated_text = filter_and_translate(clean_text)
 
         if translated_text == "NOT_SPORTS" or "NOT_SPORTS" in translated_text:
-            print(f"Tweet {t_id} skipped (Not sports).")
-            save_processed_id(t_id)
+            save_processed_id(t_id, processed_ids)
             continue
 
         media_ids = []
@@ -204,13 +188,27 @@ async def main():
                     video_link = f"https://x.com/i/status/{src_id}/video/1"
 
         final_tweet_text = fit_tweet_length(translated_text, video_link)
-
-        print(f"Publishing tweet: {final_tweet_text}")
         await client.create_tweet(text=final_tweet_text, media_ids=media_ids if media_ids else None)
-        save_processed_id(t_id)
-        posted_count += 1
-        print(f"Successfully posted tweet {t_id}!")
-        await asyncio.sleep(5)
+        save_processed_id(t_id, processed_ids)
+        print(f"Posted tweet {t_id} immediately!")
+        await asyncio.sleep(3)
+
+async def main():
+    processed_ids = load_processed_ids()
+    client = Client(language='en-US')
+    client.set_cookies({'auth_token': TW_AUTH_TOKEN, 'ct0': TW_CT0})
+
+    user = await client.get_user_by_screen_name(TARGET_USER)
+    start_time = time.time()
+
+    print(f"Starting live monitoring for @{TARGET_USER} every {CHECK_INTERVAL}s...")
+    while (time.time() - start_time) < RUN_DURATION:
+        try:
+            await check_and_post(client, user, processed_ids)
+        except Exception as e:
+            print(f"Check error (waiting 30s): {e}")
+            await asyncio.sleep(30)
+        await asyncio.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
     asyncio.run(main())
