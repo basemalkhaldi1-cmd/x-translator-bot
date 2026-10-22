@@ -1,7 +1,9 @@
 import os
 import re
 import time
+import json
 import asyncio
+import urllib.parse
 import requests
 from twikit import Client
 
@@ -104,18 +106,17 @@ def get_gemini_models():
             print(f"Model discovery warning: {e}")
 
     CACHED_GEMINI_MODELS = priority + discovered
-    print(f"Active Gemini candidate models: {CACHED_GEMINI_MODELS[:6]}")
     return CACHED_GEMINI_MODELS
 
 def load_processed_ids():
     if os.path.exists(PROCESSED_FILE):
         with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
-        if lines and lines[0] == "#v5":
-            return set(lines[1:])
+        if lines and lines[0] == "#v6":
+            return set(lines[1:]), False
     with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
-        f.write("#v5\n")
-    return set()
+        f.write("#v6\n")
+    return set(), True
 
 def save_processed_id(tweet_id, processed_set):
     processed_set.add(str(tweet_id))
@@ -130,6 +131,21 @@ def fit_tweet_length(translated_text, video_link=None):
         text = (cut if cut else text[:max_len]) + "..."
     if video_link:
         return f"{text}\n\n{video_link}"
+    return text
+
+def parse_ai_response(raw_text):
+    text = (raw_text or "").strip()
+    if not text or "<html" in text.lower() or "403 forbidden" in text.lower() or "502 bad gateway" in text.lower():
+        return None
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+            if "choices" in data:
+                return data["choices"][0]["message"]["content"].strip()
+            if "error" in data:
+                return None
+        except Exception:
+            pass
     return text
 
 def build_ai_prompt(text):
@@ -158,46 +174,85 @@ Strict Rules:
 
 def filter_and_translate(text):
     global WORKING_MODEL
-    if not GEMINI_API_KEY:
-        print("Error: GEMINI_API_KEY is missing!")
-        return None
-
     prompt = build_ai_prompt(text)
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1}
-    }
 
-    models_to_try = [WORKING_MODEL] + [m for m in get_gemini_models() if m != WORKING_MODEL] if WORKING_MODEL else get_gemini_models()
+    # 1. المحاولة الأولى عبر Gemini AI
+    if GEMINI_API_KEY:
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.1}
+        }
+        models_to_try = [WORKING_MODEL] + [m for m in get_gemini_models() if m != WORKING_MODEL] if WORKING_MODEL else get_gemini_models()
+        for model in models_to_try[:5]:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            try:
+                response = requests.post(url, json=payload, timeout=20)
+                res_json = response.json()
+                if "candidates" in res_json:
+                    result = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    if result:
+                        WORKING_MODEL = model
+                        print(f"Translated via Gemini ({model}): {result}")
+                        return result
+            except Exception as e:
+                print(f"Gemini {model} error: {e}")
 
-    for model in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        try:
-            response = requests.post(url, json=payload, timeout=20)
-            res_json = response.json()
-            if "candidates" in res_json:
-                result = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-                if result:
-                    WORKING_MODEL = model
-                    print(f"Translated via AI ({model}): {result}")
-                    return result
-            else:
-                err_msg = res_json.get("error", {}).get("message", str(res_json))
-                print(f"Model {model} skipped: {err_msg[:120]}")
-        except Exception as e:
-            print(f"Gemini {model} request error: {e}")
+    # 2. المحاولة الثانية عبر OpenAI LLM (Pollinations Direct POST)
+    try:
+        ai_res = requests.post(
+            "https://text.pollinations.ai/",
+            json={
+                "model": "openai",
+                "messages": [
+                    {"role": "system", "content": "You are a professional football translator. Never translate player or club names literally as verbs or adjectives."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.1
+            },
+            headers=HEADERS,
+            timeout=25
+        )
+        if ai_res.status_code == 200:
+            parsed = parse_ai_response(ai_res.text)
+            if parsed:
+                print(f"Translated via OpenAI (POST): {parsed}")
+                return parsed
+    except Exception as e:
+        print(f"OpenAI POST error: {e}")
 
-    print("AI translation temporarily unavailable; skipping this cycle without literal fallback.")
+    # 3. المحاولة الثالثة عبر OpenAI LLM (Pollinations Direct GET)
+    try:
+        encoded = urllib.parse.quote(prompt)
+        ai_get = requests.get(
+            f"https://text.pollinations.ai/{encoded}?model=openai",
+            headers=HEADERS,
+            timeout=25
+        )
+        if ai_get.status_code == 200:
+            parsed = parse_ai_response(ai_get.text)
+            if parsed:
+                print(f"Translated via OpenAI (GET): {parsed}")
+                return parsed
+    except Exception as e:
+        print(f"OpenAI GET error: {e}")
+
+    print("AI endpoints did not respond; waiting for next cycle.")
     return None
 
-async def check_and_post(client, user, processed_ids):
+async def check_and_post(client, user, processed_ids, is_first_run):
     tweets = await user.get_tweets('Tweets', count=5)
+    posted_in_first = 0
+
     for tweet in tweets:
         t_id = str(tweet.id)
         if t_id in processed_ids:
             continue
 
         if getattr(tweet, 'retweeted_tweet', None) is not None or getattr(tweet, 'in_reply_to_tweet_id', None) is not None:
+            save_processed_id(t_id, processed_ids)
+            continue
+
+        if is_first_run and posted_in_first >= 1:
             save_processed_id(t_id, processed_ids)
             continue
 
@@ -209,7 +264,6 @@ async def check_and_post(client, user, processed_ids):
         print(f"New tweet detected {t_id}: {clean_text[:60]}...")
         translated_text = filter_and_translate(clean_text)
 
-        # إذا لم يرد الذكاء الاصطناعي، ننتظر الدورة القادمة ولا ننشر ترجمة حرفية أبداً
         if translated_text is None:
             continue
 
@@ -241,11 +295,12 @@ async def check_and_post(client, user, processed_ids):
         final_tweet_text = fit_tweet_length(translated_text, video_link)
         await client.create_tweet(text=final_tweet_text, media_ids=media_ids if media_ids else None)
         save_processed_id(t_id, processed_ids)
+        posted_in_first += 1
         print(f"Posted tweet {t_id} immediately!")
         await asyncio.sleep(3)
 
 async def main():
-    processed_ids = load_processed_ids()
+    processed_ids, is_first_run = load_processed_ids()
     client = Client(language='en-US')
     client.set_cookies({'auth_token': TW_AUTH_TOKEN, 'ct0': TW_CT0})
 
@@ -255,7 +310,8 @@ async def main():
     print(f"Starting AI live monitoring for @{TARGET_USER} every {CHECK_INTERVAL}s...")
     while (time.time() - start_time) < RUN_DURATION:
         try:
-            await check_and_post(client, user, processed_ids)
+            await check_and_post(client, user, processed_ids, is_first_run)
+            is_first_run = False
         except Exception as e:
             print(f"Check error (waiting 30s): {e}")
             await asyncio.sleep(30)
