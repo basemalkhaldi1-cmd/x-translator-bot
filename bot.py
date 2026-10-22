@@ -9,8 +9,6 @@ from twikit import Client
 
 TARGET_USER = "Amr13jn"
 PROCESSED_FILE = "processed_ids.txt"
-CHECK_INTERVAL = 20
-RUN_DURATION = 280
 
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 TW_AUTH_TOKEN = (os.environ.get("TWITTER_AUTH_TOKEN") or "").strip().strip('"').strip("'")
@@ -79,11 +77,10 @@ def get_gemini_models():
         return CACHED_GEMINI_MODELS
 
     priority = [
+        "gemini-3-flash-preview",
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite",
         "gemini-flash-latest",
-        "gemini-flash-lite-latest",
-        "gemini-3-flash-preview",
         "gemini-2.5-pro",
     ]
     discovered = []
@@ -176,7 +173,6 @@ def filter_and_translate(text):
     global WORKING_MODEL
     prompt = build_ai_prompt(text)
 
-    # 1. المحاولة الأولى عبر Gemini AI
     if GEMINI_API_KEY:
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -197,7 +193,6 @@ def filter_and_translate(text):
             except Exception as e:
                 print(f"Gemini {model} error: {e}")
 
-    # 2. المحاولة الثانية عبر OpenAI LLM (Pollinations Direct POST)
     try:
         ai_res = requests.post(
             "https://text.pollinations.ai/",
@@ -220,7 +215,6 @@ def filter_and_translate(text):
     except Exception as e:
         print(f"OpenAI POST error: {e}")
 
-    # 3. المحاولة الثالثة عبر OpenAI LLM (Pollinations Direct GET)
     try:
         encoded = urllib.parse.quote(prompt)
         ai_get = requests.get(
@@ -236,10 +230,14 @@ def filter_and_translate(text):
     except Exception as e:
         print(f"OpenAI GET error: {e}")
 
-    print("AI endpoints did not respond; waiting for next cycle.")
     return None
 
-async def check_and_post(client, user, processed_ids, is_first_run):
+async def main():
+    processed_ids, is_first_run = load_processed_ids()
+    client = Client(language='en-US')
+    client.set_cookies({'auth_token': TW_AUTH_TOKEN, 'ct0': TW_CT0})
+
+    user = await client.get_user_by_screen_name(TARGET_USER)
     tweets = await user.get_tweets('Tweets', count=5)
     posted_in_first = 0
 
@@ -274,48 +272,34 @@ async def check_and_post(client, user, processed_ids, is_first_run):
         media_ids = []
         video_link = None
 
-        if hasattr(tweet, 'media') and tweet.media:
-            for idx, item in enumerate(tweet.media):
-                media_type = getattr(item, 'type', '')
-                if media_type == 'photo':
-                    img_url = getattr(item, 'media_url', None) or getattr(item, 'media_url_https', None)
-                    if img_url:
-                        img_data = requests.get(img_url, headers=HEADERS, timeout=20).content
-                        img_path = f"temp_{t_id}_{idx}.jpg"
-                        with open(img_path, 'wb') as img_f:
-                            img_f.write(img_data)
-                        m_id = await client.upload_media(img_path)
-                        media_ids.append(m_id)
-                        if os.path.exists(img_path):
-                            os.remove(img_path)
-                elif media_type in ['video', 'animated_gif']:
-                    src_id = getattr(item, 'source_status_id', None) or t_id
-                    video_link = f"https://x.com/i/status/{src_id}/video/1"
-
-        final_tweet_text = fit_tweet_length(translated_text, video_link)
-        await client.create_tweet(text=final_tweet_text, media_ids=media_ids if media_ids else None)
-        save_processed_id(t_id, processed_ids)
-        posted_in_first += 1
-        print(f"Posted tweet {t_id} immediately!")
-        await asyncio.sleep(3)
-
-async def main():
-    processed_ids, is_first_run = load_processed_ids()
-    client = Client(language='en-US')
-    client.set_cookies({'auth_token': TW_AUTH_TOKEN, 'ct0': TW_CT0})
-
-    user = await client.get_user_by_screen_name(TARGET_USER)
-    start_time = time.time()
-
-    print(f"Starting AI live monitoring for @{TARGET_USER} every {CHECK_INTERVAL}s...")
-    while (time.time() - start_time) < RUN_DURATION:
         try:
-            await check_and_post(client, user, processed_ids, is_first_run)
-            is_first_run = False
+            if hasattr(tweet, 'media') and tweet.media:
+                for idx, item in enumerate(tweet.media):
+                    media_type = getattr(item, 'type', '')
+                    if media_type == 'photo':
+                        img_url = getattr(item, 'media_url', None) or getattr(item, 'media_url_https', None)
+                        if img_url:
+                            img_data = requests.get(img_url, headers=HEADERS, timeout=20).content
+                            img_path = f"temp_{t_id}_{idx}.jpg"
+                            with open(img_path, 'wb') as img_f:
+                                img_f.write(img_data)
+                            m_id = await client.upload_media(img_path)
+                            media_ids.append(m_id)
+                            if os.path.exists(img_path):
+                                os.remove(img_path)
+                    elif media_type in ['video', 'animated_gif']:
+                        src_id = getattr(item, 'source_status_id', None) or t_id
+                        video_link = f"https://x.com/i/status/{src_id}/video/1"
+
+            final_tweet_text = fit_tweet_length(translated_text, video_link)
+            await client.create_tweet(text=final_tweet_text, media_ids=media_ids if media_ids else None)
+            save_processed_id(t_id, processed_ids)
+            posted_in_first += 1
+            print(f"Posted tweet {t_id} successfully!")
+            await asyncio.sleep(3)
         except Exception as e:
-            print(f"Check error (waiting 30s): {e}")
-            await asyncio.sleep(30)
-        await asyncio.sleep(CHECK_INTERVAL)
+            print(f"X posting limit reached ({e}). Stopping cycle to let X daily quota reset.")
+            break
 
 if __name__ == "__main__":
     asyncio.run(main())
