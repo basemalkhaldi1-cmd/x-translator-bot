@@ -8,8 +8,8 @@ from twikit import Client
 
 TARGET_USER = "Amr13jn"
 PROCESSED_FILE = "processed_ids.txt"
-CHECK_INTERVAL = 20   # الفحص كل 20 ثانية (أقصى سرعة آمنة ضد الحظر)
-RUN_DURATION = 280    # البقاء متصلاً بشكل متواصل طوال دورة التشغيل
+CHECK_INTERVAL = 20
+RUN_DURATION = 280
 
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 TW_AUTH_TOKEN = (os.environ.get("TWITTER_AUTH_TOKEN") or "").strip().strip('"').strip("'")
@@ -17,6 +17,55 @@ TW_CT0 = (os.environ.get("TWITTER_CT0") or "").strip().strip('"').strip("'")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+}
+
+# قاموس حماية أسماء اللاعبين والأندية التي قد تُترجم حرفياً بالخطأ
+PROPER_NAMES_MAP = {
+    "ريان شرقي": "Rayan Cherki",
+    "شرقي": "Cherki",
+    "براهيم دياز": "Brahim Diaz",
+    "إبراهيم دياز": "Brahim Diaz",
+    "أنيس حاج موسى": "Anis Hadj Moussa",
+    "حاج موسى": "Hadj Moussa",
+    "رامي بن سبعيني": "Ramy Bensebaini",
+    "بن سبعيني": "Bensebaini",
+    "ريان آيت نوري": "Rayan Ait-Nouri",
+    "آيت نوري": "Ait-Nouri",
+    "سعيد بن رحمة": "Said Benrahma",
+    "بن رحمة": "Benrahma",
+    "محمد الأمين عمورة": "Mohamed Amoura",
+    "عمورة": "Amoura",
+    "أمين غويري": "Amine Gouiri",
+    "غويري": "Gouiri",
+    "حسام عوار": "Houssem Aouar",
+    "عوار": "Aouar",
+    "فارس شايبي": "Fares Chaibi",
+    "شايبي": "Chaibi",
+    "عمر مرموش": "Omar Marmoush",
+    "مرموش": "Marmoush",
+    "محمد صلاح": "Mohamed Salah",
+    "أشرف حكيمي": "Achraf Hakimi",
+    "حكيمي": "Hakimi",
+    "حكيم زياش": "Hakim Ziyech",
+    "زياش": "Ziyech",
+    "نصير مزراوي": "Noussair Mazraoui",
+    "مزراوي": "Mazraoui",
+    "يوسف النصيري": "Youssef En-Nesyri",
+    "النصيري": "En-Nesyri",
+    "سفيان أمرابط": "Sofyan Amrabat",
+    "أمرابط": "Amrabat",
+    "بلال الخنوس": "Bilal El Khannouss",
+    "الخنوس": "El Khannouss",
+    "إسماعيل الصيباري": "Ismael Saibari",
+    "الصيباري": "Saibari",
+    "سفيان رحيمي": "Soufiane Rahimi",
+    "رحيمي": "Rahimi",
+    "نايف أكرد": "Nayef Aguerd",
+    "أكرد": "Aguerd",
+    "ياسين بونو": "Yassine Bounou",
+    "بونو": "Bounou",
+    "رياض محرز": "Riyad Mahrez",
+    "محرز": "Mahrez",
 }
 
 SPORTS_KEYWORDS = [
@@ -30,8 +79,44 @@ SPORTS_KEYWORDS = [
     "أستون", "استون", "فيلا", "نيوكاسل", "توتنهام", "لشبونه", "لشبونة", "بنفيكا", "بورتو",
     "الهلال", "النصر", "الاتحاد", "الأهلي", "الاهلي", "الشباب", "الاتفاق", "القادسية",
     "صلاح", "مبابي", "فينيسيوس", "هالاند", "ميسي", "رونالدو", "بيلينجهام", "يامال",
-    "الأول", "الاول", "الثاني", "الثالث", "الرابع", "الخامس", "ريمونتادا"
+    "شرقي", "مرموش", "حكيمي", "محرز", "الأول", "الاول", "الثاني", "الثالث", "الرابع", "ريمونتادا"
 ]
+
+CACHED_GEMINI_MODELS = None
+
+def get_gemini_models():
+    global CACHED_GEMINI_MODELS
+    if CACHED_GEMINI_MODELS is not None:
+        return CACHED_GEMINI_MODELS
+
+    default_models = ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-2.5-pro"]
+    if not GEMINI_API_KEY:
+        CACHED_GEMINI_MODELS = default_models
+        return CACHED_GEMINI_MODELS
+
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+        res = requests.get(url, timeout=15)
+        data = res.json()
+        available = []
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            methods = m.get("supportedGenerationMethods", [])
+            if "generateContent" in methods and "gemini" in name.lower():
+                if any(x in name.lower() for x in ["tts", "image", "embedding", "veo", "audio", "vision"]):
+                    continue
+                available.append(name.replace("models/", ""))
+        flash_models = [m for m in available if "flash" in m.lower()]
+        other_models = [m for m in available if "flash" not in m.lower()]
+        if flash_models or other_models:
+            CACHED_GEMINI_MODELS = flash_models + other_models
+            print(f"Discovered Gemini models: {CACHED_GEMINI_MODELS[:4]}")
+            return CACHED_GEMINI_MODELS
+    except Exception as e:
+        print(f"Model discovery warning: {e}")
+
+    CACHED_GEMINI_MODELS = default_models
+    return CACHED_GEMINI_MODELS
 
 def load_processed_ids():
     if os.path.exists(PROCESSED_FILE):
@@ -48,13 +133,9 @@ def save_processed_id(tweet_id, processed_set):
     with open(PROCESSED_FILE, "a", encoding="utf-8") as f:
         f.write(f"{tweet_id}\n")
 
-def is_sports_tweet(text):
-    normalized = re.sub(r"(.)\1{2,}", r"\1", text)
-    return any(kw in text or kw in normalized for kw in SPORTS_KEYWORDS)
-
 def fit_tweet_length(translated_text, video_link=None):
     max_len = 210 if video_link else 250
-    text = translated_text.strip()
+    text = translated_text.strip().strip('"').strip("'")
     if len(text) > max_len:
         cut = text[:max_len].rsplit(" ", 1)[0]
         text = (cut if cut else text[:max_len]) + "..."
@@ -62,15 +143,77 @@ def fit_tweet_length(translated_text, video_link=None):
         return f"{text}\n\n{video_link}"
     return text
 
-def free_fallback_translate(text):
-    if not is_sports_tweet(text):
+def build_ai_prompt(text):
+    # تزويد الذكاء الاصطناعي بملاحظات الأسماء إن وجدت في النص
+    hints = []
+    for ar_name, en_name in PROPER_NAMES_MAP.items():
+        if ar_name in text:
+            hints.append(f'"{ar_name}" = {en_name}')
+    hints_str = "\nName Glossary for this tweet: " + ", ".join(hints) if hints else ""
+
+    return f"""You are an expert football journalist and translator.
+Analyze the following Arabic tweet:
+\"\"\"{text}\"\"\"{hints_str}
+
+Instructions:
+1. Check if this tweet is related to sports/football (matches, goals, players, clubs, transfers, statements, etc.). If it is NOT related to sports at all, reply ONLY with: NOT_SPORTS
+2. BEFORE translating, carefully identify all football player names, coach names, and club names. Use their exact official English spelling (e.g., "شرقي" is the player Rayan Cherki, NOT "East/Eastern"; "الاتحاد" is Al-Ittihad, NOT "Union"; "النصر" is Al-Nassr, NOT "Victory"; "الأهلي" is Al-Ahli; "الهلال" is Al-Hilal).
+3. Translate the tweet accurately into natural English matching the original tweet's exact meaning and tone:
+   - Do NOT invent or add "GOAL!" or "GOAAAL!" unless the original Arabic tweet explicitly announces a live goal (like "قوووول" or "يسجل الهدف").
+   - If it is a news update, stat, or quote, translate it cleanly as football news without adding extra exclamations.
+   - Keep the translation concise (under 200 characters).
+   - Output ONLY the final English tweet text, with no quotes or explanations."""
+
+def filter_and_translate(text):
+    prompt = build_ai_prompt(text)
+
+    # 1. المحاولة الأولى: عبر Gemini AI مع اكتشاف تلقائي للطرازات الفعالة
+    if GEMINI_API_KEY:
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        for model in get_gemini_models()[:4]:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            try:
+                response = requests.post(url, json=payload, timeout=20)
+                res_json = response.json()
+                if "candidates" in res_json:
+                    result = res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    if result:
+                        return result
+            except Exception as e:
+                print(f"Gemini {model} error: {e}")
+
+    # 2. المحاولة الثانية: عبر نموذج الذكاء الاصطناعي الاحتياطي (Pollinations OpenAI LLM)
+    try:
+        ai_res = requests.post(
+            "https://text.pollinations.ai/openai",
+            json={
+                "model": "openai",
+                "messages": [
+                    {"role": "system", "content": "You are a professional football translator. Never translate player or club names literally."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.2
+            },
+            headers=HEADERS,
+            timeout=25
+        )
+        if ai_res.status_code == 200:
+            ai_json = ai_res.json()
+            content = ai_json["choices"][0]["message"]["content"].strip()
+            if content:
+                return content
+    except Exception as e:
+        print(f"Backup AI error: {e}")
+
+    # 3. الملاذ الأخير فقط عند انقطاع خدمات الذكاء الاصطناعي: استبدال الأسماء المحمية ثم الترجمة بدون إضافة قووول
+    normalized = re.sub(r"(.)\1{2,}", r"\1", text)
+    if not any(kw in text or kw in normalized for kw in SPORTS_KEYWORDS):
         return "NOT_SPORTS"
 
-    has_goal = bool(re.search(r"(قو+ل|جو+ل|هد+ف|يسجل)", text))
-    cleaned = re.sub(r"(قو+ل|جو+ل)", "هدف!", text)
+    cleaned = re.sub(r"(قو+ل|جو+ل)", "Goal!", text)
     cleaned = re.sub(r"(.)\1{2,}", r"\1", cleaned)
-
-    translated = ""
+    for ar_name, en_name in sorted(PROPER_NAMES_MAP.items(), key=lambda x: -len(x[0])):
+        cleaned = cleaned.replace(ar_name, en_name)
 
     try:
         res = requests.get(
@@ -81,67 +224,11 @@ def free_fallback_translate(text):
         )
         m = re.search(r'<div class="result-container">(.*?)</div>', res.text, re.DOTALL)
         if m:
-            translated = html.unescape(m.group(1)).strip()
+            return html.unescape(m.group(1)).strip()
     except Exception:
         pass
 
-    if not translated:
-        try:
-            res = requests.get(
-                "https://translate.googleapis.com/translate_a/single",
-                params={"client": "gtx", "sl": "ar", "tl": "en", "dt": "t", "q": cleaned},
-                headers=HEADERS,
-                timeout=15
-            )
-            data = res.json()
-            translated = "".join(part[0] for part in data[0] if part and part[0]).strip()
-        except Exception:
-            pass
-
-    if not translated:
-        try:
-            res = requests.get(
-                "https://api.mymemory.translated.net/get",
-                params={"q": cleaned[:450], "langpair": "ar|en"},
-                headers=HEADERS,
-                timeout=15
-            )
-            data = res.json()
-            translated = (data.get("responseData", {}).get("translatedText") or "").strip()
-        except Exception:
-            pass
-
-    if not translated:
-        return "NOT_SPORTS"
-
-    if has_goal and "GOAAAL" not in translated.upper():
-        translated = f"🚨 GOAAAL! ⚽🔥\n{translated}"
-    return translated
-
-def filter_and_translate(text):
-    if GEMINI_API_KEY:
-        prompt = f"""You are an enthusiastic sports journalist and English football commentator.
-Analyze the following Arabic tweet:
-\"\"\"{text}\"\"\"
-
-Task:
-1. Determine if this tweet is related to sports (football, matches, goals, players, clubs, etc.).
-2. If it is NOT sports-related, reply ONLY with: NOT_SPORTS
-3. If it IS sports-related, translate it into exciting, concise English football commentary under 200 characters (use natural terms like 'GOAAAL!', club/player names in English).
-Do NOT include any extra notes or explanations. Return ONLY the translated English text."""
-
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        for model in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-            try:
-                response = requests.post(url, json=payload, timeout=15)
-                res_json = response.json()
-                if "candidates" in res_json:
-                    return res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-            except Exception:
-                pass
-
-    return free_fallback_translate(text)
+    return "NOT_SPORTS"
 
 async def check_and_post(client, user, processed_ids):
     tweets = await user.get_tweets('Tweets', count=5)
