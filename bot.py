@@ -11,22 +11,59 @@ GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 TW_AUTH_TOKEN = (os.environ.get("TWITTER_AUTH_TOKEN") or "").strip().strip('"').strip("'")
 TW_CT0 = (os.environ.get("TWITTER_CT0") or "").strip().strip('"').strip("'")
 
+SPORTS_KEYWORDS = [
+    "هدف", "قوول", "قول", "جول", "يسجل", "سجل", "متقدم", "يتقدم", "التعادل", "تعادل",
+    "الفوز", "يفوز", "خسارة", "يخسر", "مباراة", "المباراة", "شوط", "الشوط", "الدقيقة",
+    "دوري", "الدوري", "أبطال", "كأس", "بطولة", "نهائي", "تأهل", "يتأهل", "مرمى", "مرماه",
+    "شباك", "الشباك", "حارس", "مدرب", "لاعب", "تشكيلة", "ركلة", "جزاء", "فاول", "ركنية",
+    "تسلل", "بطاقة", "حمراء", "صفراء", "طرد", "تمريرة", "أسيست", "هاتريك", "ثنائية",
+    "برشلونة", "ريال", "مدريد", "ليفربول", "سيتي", "أرسنال", "ارسنال", "تشيلسي", "يونايتد",
+    "بايرن", "باريس", "يوفنتوس", "ميلان", "إنتر", "انتر", "روما", "نابولي", "أتلتيكو",
+    "أستون", "استون", "فيلا", "نيوكاسل", "توتنهام", "لشبونه", "لشبونة", "بنفيكا", "بورتو",
+    "الهلال", "النصر", "الاتحاد", "الأهلي", "الاهلي", "الشباب", "الاتفاق", "القادسية",
+    "صلاح", "مبابي", "فينيسيوس", "هالاند", "ميسي", "رونالدو", "بيلينجهام", "يامال",
+    "الأول", "الاول", "الثاني", "الثالث", "الرابع", "الخامس", "ريمونتادا"
+]
+
 def load_processed_ids():
     if os.path.exists(PROCESSED_FILE):
         with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
-        if lines and lines[0] == "#v2":
+        if lines and lines[0] == "#v3":
             return set(lines[1:])
     with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
-        f.write("#v2\n")
+        f.write("#v3\n")
     return set()
 
 def save_processed_id(tweet_id):
     with open(PROCESSED_FILE, "a", encoding="utf-8") as f:
         f.write(f"{tweet_id}\n")
 
+def is_sports_tweet(text):
+    normalized = re.sub(r"(.)\1{2,}", r"\1", text)
+    return any(kw in text or kw in normalized for kw in SPORTS_KEYWORDS)
+
+def free_fallback_translate(text):
+    if not is_sports_tweet(text):
+        return "NOT_SPORTS"
+
+    has_goal = bool(re.search(r"(قو+ل|جو+ل|هد+ف|يسجل)", text))
+    cleaned = re.sub(r"(قو+ل|جو+ل)", "هدف!", text)
+    cleaned = re.sub(r"(.)\1{2,}", r"\1", cleaned)
+
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {"client": "gtx", "sl": "ar", "tl": "en", "dt": "t", "q": cleaned}
+    res = requests.get(url, params=params, timeout=20)
+    data = res.json()
+    translated = "".join(part[0] for part in data[0] if part[0]).strip()
+
+    if has_goal and "GOAAAL" not in translated.upper():
+        translated = f"🚨 GOAAAL! ⚽🔥\n{translated}"
+    return translated
+
 def filter_and_translate(text):
-    prompt = f"""You are an enthusiastic sports journalist and English football commentator.
+    if GEMINI_API_KEY:
+        prompt = f"""You are an enthusiastic sports journalist and English football commentator.
 Analyze the following Arabic tweet:
 \"\"\"{text}\"\"\"
 
@@ -36,22 +73,19 @@ Task:
 3. If it IS sports-related, translate it into exciting, authentic English football commentary style (use natural English football terms like 'GOAAAL!', match minutes, club/player names in English).
 Do NOT include any extra notes or explanations. Return ONLY the translated English text."""
 
-    models = ["gemini-2.5-flash", "gemini-flash-latest"]
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        for model in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            try:
+                response = requests.post(url, json=payload, timeout=20)
+                res_json = response.json()
+                if "candidates" in res_json:
+                    return res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except Exception:
+                pass
 
-    for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-        try:
-            response = requests.post(url, json=payload, timeout=25)
-            res_json = response.json()
-            if "candidates" in res_json:
-                return res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-            else:
-                print(f"Model {model} response: {res_json}")
-        except Exception as e:
-            print(f"Error calling {model}: {e}")
-
-    raise RuntimeError("Failed to get translation from Gemini API. Check GEMINI_API_KEY.")
+    print("Using built-in free sports translator...")
+    return free_fallback_translate(text)
 
 async def main():
     processed_ids = load_processed_ids()
@@ -71,7 +105,6 @@ async def main():
         if t_id in processed_ids:
             continue
 
-        # Skip retweets and replies
         if getattr(tweet, 'retweeted_tweet', None) is not None:
             save_processed_id(t_id)
             continue
@@ -79,7 +112,6 @@ async def main():
             save_processed_id(t_id)
             continue
 
-        # On first run, only post 1 latest sports tweet and mark older ones as read
         if is_first_run and posted_count >= 1:
             save_processed_id(t_id)
             continue
